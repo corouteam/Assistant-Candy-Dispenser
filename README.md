@@ -1,6 +1,8 @@
 # Assistant Candy Dispenser
 ## Ok Google, give me Candy!
 
+[![](https://github.com/2coffees1team/Assistant-Candy-Dispenser/blob/master/video.png)](https://www.youtube.com/watch?v=V4A27NxeOGw)
+
 --
 ## What you need
  * Rasperry PI board (Pi 3/Pi 2/Pi Zero);

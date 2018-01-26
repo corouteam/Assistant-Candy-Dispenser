@@ -88,8 +88,9 @@ We've provided our full `main.py` and `action.py` files for reference.
 
 Sweet hacking!
 
-Made with <3 at [GDG Bari](https://gdgbari.org/).
 
-![](https://gdgbari.org/img/organizers/gdg-bari.svg)
+*Made by 2 Coffees 1 Tea(m) at [GDG Bari](https://gdgbari.org/).*
+
+[![](https://gdgbari.org/img/organizers/gdg-bari.svg)](https://gdgbari.org/)
 
 

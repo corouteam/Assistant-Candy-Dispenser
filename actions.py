@@ -6,6 +6,19 @@
 from kodijson import Kodi, PLAYER_VIDEO
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+from oauth2client.tools import argparser
+from spotipy.oauth2 import SpotifyClientCredentials
+import spotipy.util as util
+import spotipy.oauth2 as oauth2
+from googletrans import Translator
+from pushbullet import Pushbullet
+from mediaplayer import api
+from youtube_search_engine import google_cloud_api_key
+from gtts import gTTS
+from youtube_search_engine import youtube_search
+from youtube_search_engine import youtube_stream_link
+import requests
+import mediaplayer
 import os
 import os.path
 import RPi.GPIO as GPIO
@@ -16,67 +29,135 @@ import aftership
 import feedparser
 import json
 import urllib.request
+import pafy
+import pychromecast
+import spotipy
+import pprint
+import yaml
+
+domoticz_devices=''
+Domoticz_Device_Control=False
+bright=''
+hexcolour=''
+
+ROOT_PATH = os.path.realpath(os.path.join(__file__, '..', '..'))
+USER_PATH = os.path.realpath(os.path.join(__file__, '..', '..','..'))
+
+# Servo pin declaration
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(27, GPIO.OUT)
+pwm=GPIO.PWM(27, 50)
+pwm.start(0)
+
+with open('{}/src/config.yaml'.format(ROOT_PATH),'r') as conf:
+    configuration = yaml.load(conf)
+
+with open('{}/src/keywords.yaml'.format(ROOT_PATH),'r') as conf:
+    custom_action_keyword = yaml.load(conf)
+
+# Get devices list from domoticz server
+if configuration['Domoticz']['Domoticz_Control']=='Enabled':
+    Domoticz_Device_Control=True
+    try:
+        domoticz_response = requests.get("https://" + configuration['Domoticz']['Server_IP'][0] + ":" + configuration['Domoticz']['Server_port'][0] + "/json.htm?type=devices&filter=all&order=Name",verify=False)
+        domoticz_devices=json.loads(domoticz_response.text)
+        with open('{}/domoticz_device_list.json'.format(USER_PATH), 'w') as devlist:
+            json.dump(domoticz_devices, devlist)
+    except requests.exceptions.ConnectionError:
+        print("Domoticz server not online")
+else:
+    Domoticz_Device_Control=False
 
 
-#YouTube API Constants
-DEVELOPER_KEY = 'PASTE YOUR YOUTUBE API KEY HERE'
-YOUTUBE_API_SERVICE_NAME = 'youtube'
-YOUTUBE_API_VERSION = 'v3'
+
+# Spotify Declarations
+# Register with spotify for a developer account to get client-id and client-secret
+if configuration['Spotify']['client_id']!= 'ENTER YOUR SPOTIFY CLIENT ID HERE' and configuration['Spotify']['client_secret']!='ENTER YOUR SPOTIFY CLIENT SECRET HERE':
+    client_id = configuration['Spotify']['client_id']
+    client_secret = configuration['Spotify']['client_secret']
+    username=configuration['Spotify']['username']
+    credentials = oauth2.SpotifyClientCredentials(client_id=client_id, client_secret=client_secret)
+    spotify_token = credentials.get_access_token()
+
+
+#Import VLC player
+vlcplayer=mediaplayer.vlcplayer()
+
+
+
+#Google Music Declarations
+song_ids=[]
+track_ids=[]
+
 
 #Login with default kodi/kodi credentials
 #kodi = Kodi("http://localhost:8080/jsonrpc")
 
 #Login with custom credentials
 # Kodi("http://IP-ADDRESS-OF-KODI:8080/jsonrpc", "username", "password")
-kodi = Kodi("http://192.168.1.15:8080/jsonrpc", "kodi", "kodi")
-musicdirectory="/home/osmc/Music/"
-videodirectory="/home/osmc/Movies/"
-windowcmd=["Home","Settings","Weather","Videos","Music","Player"]
-window=["home","settings","weather","videos","music","playercontrols"]
+kodiurl=("http://"+str(configuration['Kodi']['ip'])+":"+str(configuration['Kodi']['port'])+"/jsonrpc")
+kodi = Kodi(kodiurl, configuration['Kodi']['username'], configuration['Kodi']['password'])
+musicdirectory=configuration['Kodi']['musicdirectory']
+videodirectory=configuration['Kodi']['videodirectory']
+windowcmd=configuration['Kodi']['windowcmd']
+window=configuration['Kodi']['window']
 
 
 GPIO.setmode(GPIO.BCM)
 GPIO.setwarnings(False)
 #Number of entities in 'var' and 'PINS' should be the same
-var = ('kitchen lights', 'bathroom lights', 'bedroom lights')#Add whatever names you want. This is case is insensitive
-gpio = (12,13,24)#GPIOS for 'var'. Add other GPIOs that you want
+var = configuration['Raspberrypi_GPIO_Control']['lightnames']
+gpio = configuration['Gpios']['picontrol']
 
 #Number of station names and station links should be the same
-stnname=('Radio One', 'Radio 2', 'Radio 3', 'Radio 5')#Add more stations if you want
-stnlink=('http://www.radiofeeds.co.uk/bbcradio2.pls', 'http://www.radiofeeds.co.uk/bbc6music.pls', 'http://c5icy.prod.playlists.ihrhls.com/1469_icy', 'http://playerservices.streamtheworld.com/api/livestream-redirect/ARNCITY.mp3')
+stnname=configuration['Radio_stations']['stationnames']
+stnlink=configuration['Radio_stations']['stationlinks']
 
 #IP Address of ESP
-ip='xxxxxxxxxxxx'
+ip=configuration['ESP']['IP']
 
 #Declaration of ESP names
-devname=('Device 1', 'Device 2', 'Device 3')
-devid=('/Device1', '/Device2', '/Device3')
+devname=configuration['ESP']['devicename']
+devid=configuration['ESP']['deviceid']
 
 for pin in gpio:
     GPIO.setup(pin, GPIO.OUT)
     GPIO.output(pin, 0)
 
 #Servo pin declaration
-GPIO.setup(27, GPIO.OUT)
-pwm=GPIO.PWM(27, 50)
+servopin=configuration['Gpios']['servo'][0]
+GPIO.setup(servopin, GPIO.OUT)
+pwm=GPIO.PWM(servopin, 50)
 pwm.start(0)
 
 #Stopbutton
-GPIO.setup(23, GPIO.IN, pull_up_down = GPIO.PUD_UP)
-
-#Led Indicator
-GPIO.setup(25, GPIO.OUT)
-led=GPIO.PWM(25,1)
-led.start(0)
-
+stoppushbutton=configuration['Gpios']['stopbutton_music_AIY_pushbutton'][0]
+GPIO.setup(stoppushbutton, GPIO.IN, pull_up_down = GPIO.PUD_UP)
 playshell = None
+
+#Initialize colour list
+clrlist=[]
+clrlistfullname=[]
+clrrgblist=[]
+clrhexlist=[]
+with open('{}/src/colours.json'.format(ROOT_PATH), 'r') as col:
+     colours = json.load(col)
+for i in range(0,len(colours)):
+    clrname=colours[i]["name"]
+    clrnameshort=clrname.replace(" ","",1)
+    clrnameshort=clrnameshort.strip()
+    clrnameshort=clrnameshort.lower()
+    clrlist.append(clrnameshort)
+    clrlistfullname.append(clrname)
+    clrrgblist.append(colours[i]["rgb"])
+    clrhexlist.append(colours[i]["hex"])
 
 
 #Parcel Tracking declarations
 #If you want to use parcel tracking, register for a free account at: https://www.aftership.com
 #Add the API number and uncomment next two lines
-#api = aftership.APIv4('YOUR-AFTERSHIP-API-NUMBER')
-#couriers = api.couriers.all.get()
+#parcelapi = aftership.APIv4('YOUR-AFTERSHIP-API-NUMBER')
+#couriers = parcelapi.couriers.all.get()
 number = ''
 slug=''
 
@@ -87,23 +168,110 @@ topnews = "http://feeds.bbci.co.uk/news/rss.xml"
 sportsnews = "http://feeds.feedburner.com/ndtvsports-latest"
 quote = "http://feeds.feedburner.com/brainyquote/QUOTEBR"
 
+##Speech and translator declarations
+ttsfilename="/tmp/say.mp3"
+translator = Translator()
+language='en'
+## Other language options:
+##'af'    : 'Afrikaans'         'sq' : 'Albanian'           'ar' : 'Arabic'      'hy'    : 'Armenian'
+##'bn'    : 'Bengali'           'ca' : 'Catalan'            'zh' : 'Chinese'     'zh-cn' : 'Chinese (China)'
+##'zh-tw' : 'Chinese (Taiwan)'  'hr' : 'Croatian'           'cs' : 'Czech'       'da'    : 'Danish'
+##'nl'    : 'Dutch'             'en' : 'English'            'eo' : 'Esperanto'   'fi'    : 'Finnish'
+##'fr'    : 'French'            'de' : 'German'             'el' : 'Greek'       'hi'    : 'Hindi'
+##'hu'    : 'Hungarian'         'is' : 'Icelandic'          'id' : 'Indonesian'  'it'    : 'Italian'
+##'ja'    : 'Japanese'          'km' : 'Khmer (Cambodian)'  'ko' : 'Korean'      'la'    : 'Latin'
+##'lv'    : 'Latvian'           'mk' : 'Macedonian'         'no' : 'Norwegian'   'pl'    : 'Polish'
+##'pt'    : 'Portuguese'        'ro' : 'Romanian'           'ru' : 'Russian'     'sr'    : 'Serbian'
+##'si'    : 'Sinhala'           'sk' : 'Slovak'             'es' : 'Spanish'     'sw'    : 'Swahili'
+##'sv'    : 'Swedish'           'ta' : 'Tamil'              'th' : 'Thai'        'tr'    : 'Turkish'
+##'uk'    : 'Ukrainian'         'vi' : 'Vietnamese'         'cy' : 'Welsh'
 
-#Text to speech converter
+
+#Function for google KS custom search engine
+def kickstrater_search(query):
+    service = build("customsearch", "v1",
+            developerKey=google_cloud_api_key)
+    res = service.cse().list(
+        q=query,
+        cx = '012926744822728151901:gefufijnci4',
+        ).execute()
+    return res
+
+
+#Function for google Gaana custom search engine
+def gaana_search(query):
+    service = build("customsearch", "v1",
+            developerKey=google_cloud_api_key)
+    res = service.cse().list(
+        q=query,
+        cx = '012926744822728151901:jzpzbzih5hi',
+        ).execute()
+    return res
+
+
+
+#Text to speech converter with translation
 def say(words):
-    tempfile = "temp.wav"
-    devnull = open("/dev/null","w")
-    lang = "en-GB" #Other languages: en-US: US English, en-GB: UK English, de-DE: German, es-ES: Spanish, fr-FR: French, it-IT: Italian
-    subprocess.call(["pico2wave", "-w", tempfile, "-l", lang,  words],stderr=devnull)
-    subprocess.call(["aplay", tempfile],stderr=devnull)
-    os.remove(tempfile)
+    words= translator.translate(words, dest=language)
+    words=words.text
+    words=words.replace("Text, ",'',1)
+    words=words.strip()
+    print(words)
+    tts = gTTS(text=words, lang=language)
+    tts.save(ttsfilename)
+    os.system("mpg123 "+ttsfilename)
+    os.remove(ttsfilename)
+
+
+#Function to get HEX and RGB values for requested colour
+def getcolours(phrase):
+    usrclridx=idx=phrase.find("to")
+    usrclr=query=phrase[usrclridx:]
+    usrclr=usrclr.replace("to","",1)
+    usrclr=usrclr.replace("'}","",1)
+    usrclr=usrclr.strip()
+    usrclr=usrclr.replace(" ","",1)
+    usrclr=usrclr.lower()
+    print(usrclr)
+    try:
+        for colournum, colourname in enumerate(clrlist):
+            if usrclr in colourname:
+               RGB=clrrgblist[colournum]
+               red,blue,green=re.findall('\d+', RGB)
+               hexcode=clrhexlist[colournum]
+               cname=clrlistfullname[colournum]
+               print(cname)
+               break
+        return red,blue,green,hexcode,cname
+    except UnboundLocalError:
+        say("Sorry unable to find a matching colour")
+
+
+#Function to convert FBG to XY for Hue Lights
+def convert_rgb_xy(red,green,blue):
+    try:
+        red = pow((red + 0.055) / (1.0 + 0.055), 2.4) if red > 0.04045 else red / 12.92
+        green = pow((green + 0.055) / (1.0 + 0.055), 2.4) if green > 0.04045 else green / 12.92
+        blue = pow((blue + 0.055) / (1.0 + 0.055), 2.4) if blue > 0.04045 else blue / 12.92
+        X = red * 0.664511 + green * 0.154324 + blue * 0.162028
+        Y = red * 0.283881 + green * 0.668433 + blue * 0.047685
+        Z = red * 0.000088 + green * 0.072310 + blue * 0.986039
+        x = X / (X + Y + Z)
+        y = Y / (X + Y + Z)
+        return x,y
+    except UnboundLocalError:
+        say("No RGB values given")
+
 
 #Radio Station Streaming
 def radio(phrase):
     for num, name in enumerate(stnname):
         if name.lower() in phrase:
             station=stnlink[num]
+            print (station)
             say("Tuning into " + name)
-            p = subprocess.Popen(["/usr/bin/vlc",station],stdin=subprocess.PIPE,stdout=subprocess.PIPE)
+            vlcplayer.media_manager(station,'Radio')
+            vlcplayer.media_player(station)
 
 #ESP6266 Devcies control
 def ESP(phrase):
@@ -116,45 +284,26 @@ def ESP(phrase):
             elif 'off' in phrase:
                 ctrl='=OFF'
                 say("Turning Off " + name)
-            subprocess.Popen(["elinks", ip + dev + ctrl],stdin=subprocess.PIPE,stdout=subprocess.PIPE)
-            time.sleep(2)
-            subprocess.Popen(["/usr/bin/pkill","elinks"],stdin=subprocess.PIPE)
+            rq = requests.head("https://"+ip + dev + ctrl)
+
 
 #Stepper Motor control
 def SetAngle(angle):
     duty = angle/18 + 2
-    GPIO.output(27, True)
-#say("Moving motor by " + str(angle) + " degrees")
+    GPIO.output(servopin, True)
+    # say("Moving motor by " + str(angle) + " degrees")
     pwm.ChangeDutyCycle(duty)
     time.sleep(1)
     pwm.ChangeDutyCycle(0)
-    GPIO.output(27, False)
+    GPIO.output(servopin, False)
 
-#Play Youtube Music
-def YouTube_No_Autoplay(phrase):
-    idx=phrase.find('stream')
-    track=phrase[idx:]
-    track=track.replace("'}", "",1)
-    track = track.replace('stream','',1)
-    track=track.strip()
-    global playshell
-    if (playshell == None):
-        playshell = subprocess.Popen(["/usr/local/bin/mpsyt",""],stdin=subprocess.PIPE ,stdout=subprocess.PIPE)
-
-    print("Playing: " + track)
-    say("Playing " + track)
-    playshell.stdin.write(bytes('/' + track + '\n1\n','utf-8'))
-    playshell.stdin.flush()
-    
 
 def stop():
-    pkill = subprocess.Popen(["/usr/bin/pkill","mpsyt"],stdin=subprocess.PIPE)
-    pkill = subprocess.Popen(["/usr/bin/pkill","vlc"],stdin=subprocess.PIPE)
-    pkill = subprocess.Popen(["/usr/bin/pkill","mpv"],stdin=subprocess.PIPE)
+    vlcplayer.stop_vlc()
 
 #Parcel Tracking
 def track():
-    text=api.trackings.get(tracking=dict(slug=slug, tracking_number=number))
+    text=parcelapi.trackings.get(tracking=dict(slug=slug, tracking_number=number))
     numtrack=len(text['trackings'])
     print("Total Number of Parcels: " + str(numtrack))
     if numtrack==0:
@@ -195,7 +344,7 @@ def feed(phrase):
     title=feed['feed']['title']
     say(title)
     #To stop the feed, press and hold stop button
-    while GPIO.input(23):
+    while GPIO.input(stoppushbutton):
         for x in range(0,numfeeds):
             content=feed['entries'][x]['title']
             print(content)
@@ -203,7 +352,7 @@ def feed(phrase):
             summary=feed['entries'][x]['summary']
             print(summary)
             say(summary)
-            if not GPIO.input(23):
+            if not GPIO.input(stoppushbutton):
               break
         if x == numfeeds-1:
             break
@@ -211,63 +360,6 @@ def feed(phrase):
             continue
 
 
-#Function to search YouTube and get videoid
-def youtube_search(query):
-  youtube = build(YOUTUBE_API_SERVICE_NAME, YOUTUBE_API_VERSION,
-    developerKey=DEVELOPER_KEY)
-
-  req=query
-  # Call the search.list method to retrieve results matching the specified
-  # query term.
-  search_response = youtube.search().list(
-    q=query,
-    part='id,snippet'
-  ).execute()
-
-  videos = []
-  channels = []
-  playlists = []
-  videoids = []
-  channelids = []
-  playlistids = []
-
-  # Add each result to the appropriate list, and then display the lists of
-  # matching videos, channels, and playlists.
-
-  for search_result in search_response.get('items', []):
-
-    if search_result['id']['kind'] == 'youtube#video':
-      videos.append('%s (%s)' % (search_result['snippet']['title'],
-                                 search_result['id']['videoId']))
-      videoids.append(search_result['id']['videoId'])
-
-    elif search_result['id']['kind'] == 'youtube#channel':
-      channels.append('%s (%s)' % (search_result['snippet']['title'],
-                                   search_result['id']['channelId']))
-      channelids.append(search_result['id']['channelId'])
-
-    elif search_result['id']['kind'] == 'youtube#playlist':
-      playlists.append('%s (%s)' % (search_result['snippet']['title'],
-                                    search_result['id']['playlistId']))
-      playlistids.append(search_result['id']['playlistId'])
-
-  #Results of YouTube search. If you wish to see the results, uncomment them
-  # print 'Videos:\n', '\n'.join(videos), '\n'
-  # print 'Channels:\n', '\n'.join(channels), '\n'
-  # print 'Playlists:\n', '\n'.join(playlists), '\n'
-
-  #Checks if your query is for a channel, playlist or a video and changes the URL accordingly
-  if 'channel'.lower() in  str(req).lower() and len(channels)!=0:
-      urlid=channelids[0]
-      YouTubeURL=("https://www.youtube.com/watch?v="+channelids[0])
-  elif 'playlist'.lower() in  str(req).lower() and len(playlists)!=0:
-      urlid=playlistids[0]
-      YouTubeURL=("https://www.youtube.com/watch?v="+playlistids[0])
-  else:
-      urlid=videoids[0]
-      YouTubeURL=("https://www.youtube.com/watch?v="+videoids[0])
-
-  return YouTubeURL,urlid
 
 
 ##-------Start of functions defined for Kodi Actions--------------
@@ -280,13 +372,15 @@ def mutevolstatus():
 
 
 def kodi_youtube(query):
-    fullurl,urlid=youtube_search(query)
+    urlid = youtube_search(query)
+    if urlid is not None:
+        fullurl = "https://www.youtube.com/watch?v=" + urlid
 
  #If you want to see the URL, uncomment the following line
  #print(YouTubeURL)
 
- #Instead of sending it to Kodi, if you want to locally play in VLC, uncomment the following two lines and comment the next two lines
- #os.system("vlc "+YouTubeURL)
+ #Instead of sending it to Kodi, if you want to play locally, uncomment the following two lines and comment the next two lines
+ #vlcplayer.media_player(YouTubeURL)
  #say("Playing YouTube video")
 
     kodi.Player.open(item={"file":"plugin://plugin.video.youtube/?action=play_video&videoid=" + urlid})
@@ -427,7 +521,7 @@ def singleplaykodi(query):
     track=query[idx:]
     track=track.replace("'}", "",1)
     track = track.replace('play','',1)
-    track = track.replace('on kodi','',1)
+    track = track.replace((custom_action_keyword['Keywords']['Kodi_actions'][0]),'',1)
     track=track.strip()
     say("Searching for your file")
     if 'song'.lower() in str(track).lower() or 'track'.lower() in str(track).lower() or 'audio'.lower() in str(track).lower():
@@ -562,7 +656,7 @@ def kodiactions(phrase):
         track=query[idx:]
         track=track.replace("'}", "",1)
         track = track.replace('play','',1)
-        track = track.replace('on kodi','',1)
+        track = track.replace((custom_action_keyword['Keywords']['Kodi_actions'][0]),'',1)
         if 'youtube'.lower() in track:
             track=track.replace('youtube','',1)
         elif 'video'.lower() in track:
@@ -582,7 +676,7 @@ def kodiactions(phrase):
         artist = query[idx:]
         artist = artist.replace("'}", "",1)
         artist = artist.replace('artist','',1)
-        artist = artist.replace('on kodi','',1)
+        artist = artist.replace((custom_action_keyword['Keywords']['Kodi_actions'][0]),'',1)
         artist = artist.strip()
         say("Searching for renditions")
         kodiartist(artist)
@@ -603,7 +697,7 @@ def kodiactions(phrase):
         players=kodi.Player.GetActivePlayers()
         playid=players["result"][0]["playerid"]
         cmd=str(phrase).lower()
-        cmd=cmd.replace('on kodi','',1)
+        cmd=cmd.replace((custom_action_keyword['Keywords']['Kodi_actions'][0]),'',1)
         cmd=cmd.strip()
         if 'on'.lower() in str(cmd).lower():
             kodi.Player.SetShuffle({"playerid": playid,"shuffle":True})
@@ -635,7 +729,7 @@ def kodiactions(phrase):
     elif 'set'.lower() in str(phrase).lower() and 'volume'.lower() in str(phrase).lower():
         for s in re.findall(r'\b\d+\b', phrase):
             kodi.Application.SetVolume({"volume": int(s)})
-            with open('/home/pi/.volume.json', 'w') as f:
+            with open('{}/.volume.json'.format(USER_PATH), 'w') as f:
                    json.dump(int(s), f)
     elif 'toggle mute'.lower() in str(phrase).lower():
         status=mutevolstatus()
@@ -703,7 +797,7 @@ def fetchautoplaylist(url,numvideos):
     autonum=numvideos
     autoplay_urls=[]
     autoplay_urls.append(videourl)
-    for i in range(0,autonum):        
+    for i in range(0,autonum):
         response=urllib.request.urlopen(videourl)
         webContent = response.read()
         webContent = webContent.decode('utf-8')
@@ -725,50 +819,716 @@ def fetchautoplaylist(url,numvideos):
 ##    print(autoplay_urls)
     return autoplay_urls
 
-#Play Youtube Music
+
+
+
+##-------Start of functions defined for Google Music-------------------
+
+def loadsonglist():
+    song_ids=[]
+    if os.path.isfile("{}/songs.json".format(USER_PATH)):
+        with open('{}/songs.json'.format(USER_PATH),'r') as input_file:
+            songs_list= json.load(input_file)
+##            print(songs_list)
+    else:
+        songs_list= api.get_all_songs()
+        with open('{}/songs.json'.format(USER_PATH), 'w') as output_file:
+            json.dump(songs_list, output_file)
+    for i in range(0,len(songs_list)):
+        song_ids.append(songs_list[i]['id'])
+    songsnum=len(songs_list)
+    return song_ids, songsnum
+
+def loadartist(artistname):
+    song_ids=[]
+    artist=str(artistname)
+    if os.path.isfile("{}/songs.json".format(USER_PATH)):
+        with open('{}/songs.json'.format(USER_PATH),'r') as input_file:
+            songs_list= json.load(input_file)
+##            print(songs_list)
+    else:
+        songs_list= api.get_all_songs()
+        with open('{}/songs.json'.format(USER_PATH), 'w') as output_file:
+            json.dump(songs_list, output_file)
+    for i in range(0,len(songs_list)):
+        if artist.lower() in (songs_list[i]['albumArtist']).lower():
+            song_ids.append(songs_list[i]['id'])
+        else:
+            print("Artist not found")
+    songsnum=len(song_ids)
+    return song_ids, songsnum
+
+def loadalbum(albumname):
+    song_ids=[]
+    album=str(albumname)
+    if os.path.isfile("{}/songs.json".format(USER_PATH)):
+        with open('{}/songs.json'.format(USER_PATH),'r') as input_file:
+            songs_list= json.load(input_file)
+##            print(songs_list)
+    else:
+        songs_list= api.get_all_songs()
+        with open('{}/songs.json'.format(USER_PATH), 'w') as output_file:
+            json.dump(songs_list, output_file)
+    for i in range(0,len(songs_list)):
+        if album.lower() in (songs_list[i]['album']).lower():
+            song_ids.append(songs_list[i]['id'])
+        else:
+            print("Album not found")
+    songsnum=len(song_ids)
+    return song_ids, songsnum
+
+def loadplaylist(playlistnum):
+    track_ids=[]
+    if os.path.isfile("{}/playlist.json".format(USER_PATH)):
+        with open('{}/playlist.json'.format(USER_PATH),'r') as input_file:
+            playlistcontents= json.load(input_file)
+    else:
+        playlistcontents=api.get_all_user_playlist_contents()
+        with open('{}/playlist.json'.format(USER_PATH), 'w') as output_file:
+            json.dump(playlistcontents, output_file)
+##        print(playlistcontents[0]['tracks'])
+
+    for k in range(0,len(playlistcontents[playlistnum]['tracks'])):
+        track_ids.append(playlistcontents[playlistnum]['tracks'][k]['trackId'])
+##        print(track_ids)
+    tracksnum=len(playlistcontents[playlistnum]['tracks'])
+    return track_ids, tracksnum
+
+def refreshlists():
+    playlist_list=api.get_all_user_playlist_contents()
+    songs_list=api.get_all_songs()
+    with open('{}/songs.json'.format(USER_PATH), 'w') as output_file:
+        json.dump(songs_list, output_file)
+    with open('{}/playlist.json'.format(USER_PATH), 'w') as output_file:
+        json.dump(playlist_list, output_file)
+    say("Music list synchronised")
+
+
+
+def gmusicselect(phrase):
+    currenttrackid=0
+    if 'all the songs'.lower() in phrase:
+        say("Looking for your songs")
+        tracks,numtracks=loadsonglist()
+        if not tracks==[]:
+            vlcplayer.media_manager(tracks,'Google Music')
+            vlcplayer.googlemusic_player(currenttrackid)
+        else:
+            say("Unable to find songs matching your request")
+
+
+    if 'playlist'.lower() in phrase:
+        if 'first'.lower() in phrase or 'one'.lower() in phrase  or '1'.lower() in phrase:
+            say("Playing songs from your playlist")
+            tracks,numtracks=loadplaylist(0)
+            if not tracks==[]:
+                vlcplayer.media_manager(tracks,'Google Music')
+                vlcplayer.googlemusic_player(currenttrackid)
+            else:
+                say("Unable to find songs matching your request")
+
+
+    if 'album'.lower() in phrase:
+        req=phrase
+        idx=(req).find('album')
+        album=req[idx:]
+        album=album.replace("'}", "",1)
+        album = album.replace('album','',1)
+        if 'from'.lower() in req:
+            album = album.replace('from','',1)
+            album = album.replace((custom_action_keyword['Keywords']['Google_music_streaming'][0]),'',1)
+        else:
+            album = album.replace((custom_action_keyword['Keywords']['Google_music_streaming'][0]),'',1)
+        album=album.strip()
+        print(album)
+        say("Looking for songs from the album")
+        tracks,numtracks=loadalbum(album)
+        if not tracks==[]:
+            vlcplayer.media_manager(tracks,'Google Music')
+            vlcplayer.googlemusic_player(currenttrackid)
+        else:
+            say("Unable to find songs matching your request")
+
+    if 'artist'.lower() in phrase:
+        req=phrase
+        idx=(req).find('artist')
+        artist=req[idx:]
+        artist=artist.replace("'}", "",1)
+        artist = artist.replace('artist','',1)
+        if 'from'.lower() in req:
+            artist = artist.replace('from','',1)
+            artist = artist.replace((custom_action_keyword['Keywords']['Google_music_streaming'][0]),'',1)
+        else:
+            artist = artist.replace((custom_action_keyword['Keywords']['Google_music_streaming'][0]),'',1)
+        artist=artist.strip()
+        print(artist)
+        say("Looking for songs rendered by the artist")
+        tracks,numtracks=loadartist(artist)
+        if not tracks==[]:
+            vlcplayer.media_manager(tracks,'Google Music')
+            vlcplayer.googlemusic_player(currenttrackid)
+        else:
+            say("Unable to find songs matching your request")
+
+
+#----------End of functions defined for Google Music---------------------------
+
+
+#-----------------Start of Functions for YouTube Streaming---------------------
+
 def YouTube_Autoplay(phrase):
-    idx=phrase.find('stream')
+    try:
+        urllist=[]
+        currenttrackid=0
+        idx=phrase.find((custom_action_keyword['Keywords']['YouTube_music_stream'][0]))
+        track=phrase[idx:]
+        track=track.replace("'}", "",1)
+        track = track.replace((custom_action_keyword['Keywords']['YouTube_music_stream'][0]),'',1)
+        track=track.strip()
+        say("Getting autoplay links")
+        print(track)
+        autourls=youtube_search(track,10) # Maximum of 10 URLS
+        print(autourls)
+        say("Adding autoplay links to the playlist")
+        for i in range(0,len(autourls)):
+            audiostream,videostream=youtube_stream_link(autourls[i])
+            streamurl=audiostream
+            urllist.append(streamurl)
+        if not urllist==[]:
+                vlcplayer.media_manager(urllist,'YouTube')
+                vlcplayer.youtube_player(currenttrackid)
+        else:
+            say("Unable to find songs matching your request")
+    except:
+        say('It is no longer available in youtube')
+
+def YouTube_No_Autoplay(phrase):
+    try:
+        urllist=[]
+        currenttrackid=0
+        idx=phrase.find((custom_action_keyword['Keywords']['YouTube_music_stream'][0]))
+        track=phrase[idx:]
+        track=track.replace("'}", "",1)
+        track = track.replace((custom_action_keyword['Keywords']['YouTube_music_stream'][0]),'',1)
+        track=track.strip()
+        say("Getting youtube link")
+        print(track)
+        urlid=youtube_search(track)
+        if urlid is not None:
+            fullurl="https://www.youtube.com/watch?v="+urlid
+            audiostream,videostream=youtube_stream_link(fullurl)
+            streamurl=audiostream
+            urllist.append(streamurl)
+            vlcplayer.media_manager(urllist,'YouTube')
+            vlcplayer.youtube_player(currenttrackid)
+        else:
+            say("Unable to find songs matching your request")
+    except:
+        say('It is no longer available in youtube')
+
+#-----------------End of Functions for YouTube Streaming---------------------
+
+
+
+#--------------Start of Chromecast functions-----------------------------------
+
+def chromecast_play_video(phrase):
+    # Chromecast declarations
+    # Do not rename/change "TV" its a variable
+    TV = pychromecast.Chromecast("192.168.1.13") #Change ip to match the ip-address of your Chromecast
+    mc = TV.media_controller
+    idx=phrase.find('play')
+    query=phrase[idx:]
+    query=query.replace("'}", "",1)
+    query=query.replace('play','',1)
+    query=query.replace('on chromecast','',1)
+    query=query.strip()
+    youtubelinks=youtube_search(query)
+    youtubeurl=youtubelinks[0]
+    streams=youtube_stream_link(youtubeurl)
+    videostream=streams[1]
+    TV.wait()
+    time.sleep(1)
+    mc.play_media(videostream,'video/mp4')
+
+def chromecast_control(action):
+    # Chromecast declarations
+    # Do not rename/change "TV" its a variable
+    TV = pychromecast.Chromecast("192.168.1.13") #Change ip to match the ip-address of your Chromecast
+    mc = TV.media_controller
+    if 'pause'.lower() in str(action).lower():
+        TV.wait()
+        time.sleep(1)
+        mc.pause()
+    if 'resume'.lower() in str(action).lower():
+        TV.wait()
+        time.sleep(1)
+        mc.play()
+    if 'end'.lower() in str(action).lower():
+        TV.wait()
+        time.sleep(1)
+        mc.stop()
+    if 'volume'.lower() in str(action).lower():
+        if 'up'.lower() in str(action).lower():
+            TV.wait()
+            time.sleep(1)
+            TV.volume_up(0.2)
+        if 'down'.lower() in str(action).lower():
+            TV.wait()
+            time.sleep(1)
+            TV.volume_down(0.2)
+
+#-------------------End of Chromecast Functions---------------------------------
+
+#-------------------Start of Kickstarter Search functions-----------------------
+def campaign_page_parser(campaignname):
+    page_link=kickstrater_search(campaignname)
+    kicktrackurl=page_link['items'][0]['link']
+    response=urllib.request.urlopen(kicktrackurl)
+    webContent = response.read()
+    webContent = webContent.decode('utf-8')
+    return webContent
+
+def kickstarter_get_data(page_source,parameter):
+    idx=page_source.find(parameter)
+    info=page_source[idx:]
+    info=info.replace(parameter,"",1)
+    idx=info.find('"')
+    info=info[:idx]
+    info=info.replace('"',"",1)
+    info=info.strip()
+    result=info
+    return result
+
+def get_campaign_title(campaign):
+    campaigntitle=campaign
+    campaigntitleidx1=campaigntitle.find('<title>')
+    campaigntitleidx2=campaigntitle.find('&mdash;')
+    campaigntitle=campaigntitle[campaigntitleidx1:campaigntitleidx2]
+    campaigntitle=campaigntitle.replace('<title>',"",1)
+    campaigntitle=campaigntitle.replace('&mdash;',"",1)
+    campaigntitle=campaigntitle.strip()
+    return campaigntitle
+
+def get_pledges_offered(campaign):
+    pledgesoffered=campaign
+    pledgenum=0
+    for num in re.finditer('pledge__reward-description pledge__reward-description--expanded',pledgesoffered):
+        pledgenum=pledgenum+1
+    return pledgenum
+
+def get_funding_period(campaign):
+    period=campaign
+    periodidx=period.find('Funding period')
+    period=period[periodidx:]
+    periodidx=period.find('</p>')
+    period=period[:periodidx]
+    startperiodidx1=period.find('class="invisible-if-js js-adjust-time">')
+    startperiodidx2=period.find('</time>')
+    startperiod=period[startperiodidx1:startperiodidx2]
+    startperiod=startperiod.replace('class="invisible-if-js js-adjust-time">','',1)
+    startperiod=startperiod.replace('</time>','',1)
+    startperiod=startperiod.strip()
+    period2=period[startperiodidx2+5:]
+    endperiodidx1=period2.find('class="invisible-if-js js-adjust-time">')
+    endperiodidx2=period2.find('</time>')
+    endperiod=period2[endperiodidx1:endperiodidx2]
+    endperiod=endperiod.replace('class="invisible-if-js js-adjust-time">','',1)
+    endperiod=endperiod.replace('</time>','',1)
+    endperiod=endperiod.strip()
+    duration=period2[endperiodidx2:]
+    duration=duration.replace('</time>','',1)
+    duration=duration.replace('(','',1)
+    duration=duration.replace(')','',1)
+    duration=duration.replace('days','day',1)
+    duration=duration.strip()
+    return startperiod,endperiod,duration
+
+def kickstarter_tracker(phrase):
+    idx=phrase.find('of')
+    campaign_name=phrase[idx:]
+    campaign_name=campaign_name.replace("kickstarter campaign", "",1)
+    campaign_name = campaign_name.replace('of','',1)
+    campaign_name=campaign_name.strip()
+    campaign_source=campaign_page_parser(campaign_name)
+    campaign_title=get_campaign_title(campaign_source)
+    campaign_num_rewards=get_pledges_offered(campaign_source)
+    successidx=campaign_source.find('to help bring this project to life.')
+    if str(successidx)==str(-1):
+        backers=kickstarter_get_data(campaign_source,'data-backers-count="')
+        totalpledged=kickstarter_get_data(campaign_source,'data-pledged="')
+        totaltimerem=kickstarter_get_data(campaign_source,'data-hours-remaining="')
+        totaldur=kickstarter_get_data(campaign_source,'data-duration="')
+        endtime=kickstarter_get_data(campaign_source,'data-end_time="')
+        goal=kickstarter_get_data(campaign_source,'data-goal="')
+        percentraised=kickstarter_get_data(campaign_source,'data-percent-raised="')
+        percentraised=round(float(percentraised),2)
+        if int(totaltimerem)>0:
+            #print(campaign_title+" is an ongoing campaign with "+str(totaltimerem)+" hours of fundraising still left." )
+            say(campaign_title+" is an ongoing campaign with "+str(totaltimerem)+" hours of fundraising still left." )
+            #print("Till now, "+str(backers)+ " backers have pledged for "+str(campaign_num_rewards)+" diferent rewards raising $"+str(totalpledged)+" , which is "+str(percentraised)+" times the requested amount of $"+str(goal))
+            say("Till now, "+str(backers)+ " backers have pledged for "+str(campaign_num_rewards)+" diferent rewards raising $"+str(totalpledged)+" , which is "+str(percentraised)+" times the requested amount of $"+str(goal))
+        if float(percentraised)<1 and int(totaltimerem)<=0:
+            #print(campaign_title+" has already ended")
+            say(campaign_title+" has already ended")
+            #print(str(backers)+ " backers raised $"+str(totalpledged)+" , which was "+str(percentraised)+" times the requested amount of $"+str(goal))
+            say(str(backers)+ " backers raised $"+str(totalpledged)+" , which was "+str(percentraised)+" times the requested amount of $"+str(goal))
+            #print(campaign_title+" was unseccessful in raising the requested amount of $"+str(goal)+" ." )
+            say(campaign_title+" was unseccessful in raising the requested amount of $"+str(goal)+" ." )
+        if float(percentraised)>1 and int(totaltimerem)<=0:
+            #print(campaign_title+" has already ended")
+            say(campaign_title+" has already ended")
+            #print(str(backers)+ " backers raised $"+str(totalpledged)+" , which was "+str(percentraised)+" times the requested amount of $"+str(goal))
+            say(str(backers)+ " backers raised $"+str(totalpledged)+" , which was "+str(percentraised)+" times the requested amount of $"+str(goal))
+            #print("Though the funding goal was reached, due to reasons undisclosed, the campaign was either cancelled by the creator or Kickstarter.")
+            say("Though the funding goal was reached, due to reasons undisclosed, the campaign was either cancelled by the creator or Kickstarter.")
+    else:
+        [start_day,end_day,numdays]=get_funding_period(campaign_source)
+        campaigninfo=campaign_source[(successidx-100):(successidx+35)]
+        campaignidx=campaigninfo.find('<b>')
+        campaigninfo=campaigninfo[campaignidx:]
+        campaigninfo=campaigninfo.replace('<b>',"",1)
+        campaigninfo=campaigninfo.replace('</b>',"",1)
+        campaigninfo=campaigninfo.replace('<span class="money">',"",1)
+        campaigninfo=campaigninfo.replace('</span>',"",1)
+        campaigninfo=campaigninfo.strip()
+        #print(campaign_title+" was a "+str(numdays)+" campaign launched on "+str(start_day))
+        #print(campaigninfo)
+        say(campaign_title+" was a "+str(numdays)+" campaign launched on "+str(start_day))
+        say(campaigninfo)
+
+#------------------------------End of Kickstarter Search functions---------------------------------------
+
+
+#----------------------------------Start of Push Message function-----------------------------------------
+def pushmessage(title,body):
+    pb = Pushbullet('ENTER-YOUR-PUSHBULLET-KEY-HERE')
+    push = pb.push_note(title,body)
+#----------------------------------End of Push Message Function-------------------------------------------
+
+
+#----------------------------------Start of recipe Function----------------------------------------------
+def getrecipe(item):
+    appid='ENTER-YOUR-APPID-HERE'
+    appkey='ENTER-YOUR-APP-KEY-HERE'
+    recipeurl = 'https://api.edamam.com/search?q='+item+'&app_id='+appid+'&app_key='+appkey
+    print(recipeurl)
+    recipedetails = urllib.request.urlopen(recipeurl)
+    recipedetails=recipedetails.read()
+    recipedetails = recipedetails.decode('utf-8')
+    recipedetails=json.loads(recipedetails)
+    recipe_ingredients=str(recipedetails['hits'][0]['recipe']['ingredientLines'])
+    recipe_url=recipedetails['hits'][0]['recipe']['url']
+    recipe_name=recipedetails['hits'][0]['recipe']['label']
+    recipe_ingredients=recipe_ingredients.replace('[','',1)
+    recipe_ingredients=recipe_ingredients.replace(']','',1)
+    recipe_ingredients=recipe_ingredients.replace('"','',1)
+    recipe_ingredients=recipe_ingredients.strip()
+    print(recipe_name)
+    print("")
+    print(recipe_url)
+    print("")
+    print(recipe_ingredients)
+    compiled_recipe_info="\nRecipe Source URL:\n"+recipe_url+"\n\nRecipe Ingredients:\n"+recipe_ingredients
+    pushmessage(str(recipe_name),str(compiled_recipe_info))
+
+#---------------------------------End of recipe Function------------------------------------------------
+
+
+#--------------------------------Start of Hue Control Functions------------------------------------------
+
+def hue_control(phrase,lightindex,lightaddress):
+    with open('{}/src/diyHue/config.json'.format(ROOT_PATH), 'r') as config:
+         hueconfig = json.load(config)
+    currentxval=hueconfig['lights'][lightindex]['state']['xy'][0]
+    currentyval=hueconfig['lights'][lightindex]['state']['xy'][1]
+    currentbri=hueconfig['lights'][lightindex]['state']['bri']
+    currentct=hueconfig['lights'][lightindex]['state']['ct']
+    huelightname=str(hueconfig['lights'][lightindex]['name'])
+    try:
+        if 'on' in phrase:
+            huereq=requests.head("http://"+lightaddress+"/set?light="+lightindex+"&on=true")
+            say("Turning on "+huelightname)
+        if 'off' in phrase:
+            huereq=requests.head("http://"+lightaddress+"/set?light="+lightindex+"&on=false")
+            say("Turning off "+huelightname)
+        if 'çolor' in phrase:
+            rcolour,gcolour,bcolour,hexcolour,colour=getcolours(phrase)
+            print(str([rcolour,gcolour,bcolour,hexcolour,colour]))
+            xval,yval=convert_rgb_xy(int(rcolour),int(gcolour),int(bcolour))
+            print(str([xval,yval]))
+            huereq=requests.head("http://"+lightaddress+"/set?light="+lightindex+"&x="+str(xval)+"&y="+str(yval)+"&on=true")
+            print("http://"+lightaddress+"/set?light="+lightindex+"&x="+str(xval)+"&y="+str(yval)+"&on=true")
+            say("Setting "+huelightname+" to "+colour)
+        if 'brightness'.lower() in phrase:
+            if 'hundred'.lower() in phrase or 'maximum' in phrase:
+                bright=100
+            elif 'zero'.lower() in phrase or 'minimum' in phrase:
+                bright=0
+            else:
+                bright=re.findall('\d+', phrase)
+            brightval= (bright/100)*255
+            huereq=requests.head("http://"+lightaddress+"/set?light="+lightindex+"&on=true&bri="+str(brightval))
+            say("Changing "+huelightname+" brightness to "+bright+" percent")
+    except (requests.exceptions.ConnectionError,TypeError) as errors:
+        if str(errors)=="'NoneType' object is not iterable":
+            print("Type Error")
+        else:
+            say("Device not online")
+
+#------------------------------End of Hue Control Functions---------------------------------------------
+
+#------------------------------Start of Spotify Functions-----------------------------------------------
+
+def show_spotify_track_names(tracks):
+    spotify_tracks=[]
+    for i, item in enumerate(tracks['items']):
+        track = item['track']
+##        print ("%d %32.32s %s" % (i, track['artists'][0]['name'],track['name']))
+        # print ("%s %s" % (track['artists'][0]['name'],track['name']))
+        spotify_tracks.append("%s %s" % (track['artists'][0]['name'],track['name']))
+    return spotify_tracks
+
+def scan_spotify_playlists():
+    if spotify_token:
+        i=0
+        playlistdetails=[]
+        spotify_tracks_list=[]
+        sp = spotipy.Spotify(auth=spotify_token)
+        # print(sp.user(username))
+        # print("")
+        # print("")
+        playlists = sp.user_playlists(username)
+        print(len(playlists['items']))
+        num_playlists=len(playlists['items'])
+        spotify_playlists={"Playlists":[0]*(len(playlists['items']))}
+        # print(spotify_playlists)
+        # print("")
+        # print("")
+        for playlist in playlists['items']:
+            if playlist['owner']['id'] == username:
+                # print (playlist['name'])
+                playlist_name=playlist['name']
+                # print("")
+                # print("")
+    ##            print ('  total tracks', playlist['tracks']['total'])
+    ##            print("")
+    ##            print("")
+                results = sp.user_playlist(username, playlist['id'],fields="tracks,next")
+                tracks = results['tracks']
+                spotify_tracks_list=show_spotify_track_names(tracks)
+            playlistdetails.append(i)
+            playlistdetails.append(playlist_name)
+            playlistdetails.append(spotify_tracks_list)
+            spotify_playlists['Playlists'][i]=playlistdetails
+            playlistdetails=[]
+            i=i+1
+        # print("")
+        # print("")
+        # print(spotify_playlists['Playlists'])
+        return spotify_playlists, num_playlists
+    else:
+        say("Can't get token for, " + username)
+        print("Can't get token for ", username)
+
+def spotify_playlist_select(phrase):
+    trackslist=[]
+    currenttrackid=0
+    idx=phrase.find('play')
     track=phrase[idx:]
     track=track.replace("'}", "",1)
-    track = track.replace('stream','',1)
+    track = track.replace('play','',1)
+    track = track.replace('from spotify','',1)
     track=track.strip()
-    say("Getting links")
-    fullurl,urlid=youtube_search(track)
-    autourls=fetchautoplaylist(fullurl,10)#Maximum of 10 URLS
-    print(autourls)
-    say("Adding autoplay links to the playlist")
-    for i in range(0,len(autourls)):
-        os.system('mpsyt url '+autourls[i]+', add 1 mylist, exit')
-    
-    print("Playing: " + track)
-    say("Playing " + track)
-    global playshell
-    if (playshell == None):
-        playshell = subprocess.Popen(["/usr/local/bin/mpsyt","play mylist"],stdin=subprocess.PIPE ,stdout=subprocess.PIPE)
+    say("Getting music links")
+    print(track)
+    playlists,num=scan_spotify_playlists()
+    if not num==[]:
+        for i in range(0,num):
+            print(str(playlists['Playlists'][i][1]).lower())
+            if track in str(playlists['Playlists'][i][1]).lower():
+                trackslist=playlists['Playlists'][i][2]
+                break
+        if not trackslist==[]:
+            vlcplayer.media_manager(trackslist,'Spotify')
+            vlcplayer.spotify_player(currenttrackid)
     else:
-        print("Error")
+        say("Unable to find matching playlist")
 
-    
-                   
+#----------------------End of Spotify functions---------------------------------
 
-    
+#----------------------Start of Domoticz Control Functions----------------------
+def domoticz_control(query,index,devicename):
+    global hexcolour,bright,devorder
+    try:
+        for j in range(0,len(domoticz_devices['result'])):
+            if domoticz_devices['result'][j]['idx']==index:
+                devorder=j
+                break
+        if ' on ' in query or ' on' in query or 'on ' in query:
+            devreq=requests.head("https://" + configuration['Domoticz']['Server_IP'][0] + ":" + configuration['Domoticz']['Server_port'][0] + "/json.htm?type=command&param=switchlight&idx=" + index + "&switchcmd=On",verify=False)
+            say('Turning on ' + devicename + ' .')
+        if 'off' in query:
+            devreq=requests.head("https://" + configuration['Domoticz']['Server_IP'][0] + ":" + configuration['Domoticz']['Server_port'][0] + "/json.htm?type=command&param=switchlight&idx=" + index + "&switchcmd=Off",verify=False)
+            say('Turning off ' + devicename + ' .')
+        if 'toggle' in query:
+            devreq=requests.head("https://" + configuration['Domoticz']['Server_IP'][0] + ":" + configuration['Domoticz']['Server_port'][0] + "/json.htm?type=command&param=switchlight&idx=" + index + "&switchcmd=Toggle",verify=False)
+            say('Toggling ' + devicename + ' .')
+        if 'colour' in query:
+            if 'RGB' in domoticz_devices['result'][devorder]['SubType']:
+                rcolour,gcolour,bcolour,hexcolour,colour=getcolours(query)
+                hexcolour=hexcolour.replace("#","",1)
+                hexcolour=hexcolour.strip()
+                print(hexcolour)
+                if bright=='':
+                    bright=str(domoticz_devices['result'][devorder]['Level'])
+                devreq=requests.head("https://" + configuration['Domoticz']['Server_IP'][0] + ":" + configuration['Domoticz']['Server_port'][0] + "/json.htm?type=command&param=setcolbrightnessvalue&idx=" + index + "&hex=" + hexcolour + "&brightness=" + bright + "&iswhite=false",verify=False)
+                say('Setting ' + devicename + ' to ' + colour + ' .')
+            else:
+                say('The requested light is not a colour bulb')
+        if 'brightness' in query:
+            if domoticz_devices['result'][devorder]['HaveDimmer']:
+                if 'hundred' in query or 'hundred'.lower() in query or 'maximum' in query:
+                    bright=str(100)
+                elif 'zero' in query or 'minimum' in query:
+                    bright=str(0)
+                else:
+                    bright=re.findall('\d+', query)
+                    bright=bright[0]
+                devreq=requests.head("https://" + configuration['Domoticz']['Server_IP'][0] + ":" + configuration['Domoticz']['Server_port'][0] + "/json.htm?type=command&param=switchlight&idx=" + index + "&switchcmd=Set%20Level&level=" + bright ,verify=False)
+                say('Setting ' + devicename + ' brightness to ' + str(bright) + ' percent.')
+            else:
+                say('The requested light does not have a dimer')
 
+    except (requests.exceptions.ConnectionError,TypeError) as errors:
+        if str(errors)=="'NoneType' object is not iterable":
+            print("Type Error")
+        else:
+            say("Device or Domoticz server is not online")
+#------------------------End of Domoticz Control Functions----------------------
+
+#------------------------Start of Gaana Functions-------------------------------
+def getgaanaplaylistinfo(playlisturl):
+    trackstart=[]
+    trackend=[]
+    playliststart=[]
+    playlistend=[]
+    trackdetails=[]
+    response=urllib.request.urlopen(playlisturl)
+    response=response.read().decode('utf-8')
+    for a in re.finditer('{"title":',response):
+        trackstart.append(a.start())
+    for b in re.finditer('"parental_warning":0}',response):
+        trackend.append(b.end())
+    for c in re.finditer('{"source":',response):
+        playliststart=c.start()
+    for d in re.finditer('}</span>',response):
+        playlistend=int(d.start())+1
+    playlistinfo=json.loads(response[playliststart:playlistend])
+    playlistname=playlistinfo['title']
+    if len(trackstart)==len(trackend) and len(trackstart)>0:
+        for i in range(0,len(trackstart)):
+            trackdetails.append(json.loads(response[trackstart[i]:trackend[i]]))
+    else:
+        trackdetails=[]
+    numtracks=len(trackdetails)
+    return playlistname,numtracks,trackdetails
+
+def gaana_playlist_select(phrase):
+    trackslist=[]
+    currenttrackid=0
+    idx=phrase.find('play')
+    track=phrase[idx:]
+    track=track.replace("'}", "",1)
+    track = track.replace('play','',1)
+    track = track.replace('from gaana.com','',1)
+    track=track.strip()
+    playlistnumreq=re.findall(r'\b\d+\b', track)
+    if playlistnumreq !=[]:
+        playlistnumreq=playlistnumreq[0]
+    userplaylists=configuration['Gaana']['Playlist']
+    numuserplaylists=len(userplaylists)
+    if playlistnumreq !=[] and "top" not in track and int(playlistnumreq) <= int(numuserplaylists):
+        print("Getting links for playlist number " + playlistnumreq)
+        say("Getting links for playlist number " + playlistnumreq)
+        reqplaylist=configuration['Gaana']['Playlist'][(int(playlistnumreq)-1)]
+    else:
+        print("Searching for " + track +  " in gaana.com")
+        say("Searching for " + track +  " in gaana.com")
+        page_link=gaana_search(track)
+        reqplaylist=page_link['items'][0]['link']
+    name,numsongs,tracks= getgaanaplaylistinfo(reqplaylist)
+    print(numsongs)
+    if not numsongs==[]:
+        say("Getting the tracks from " + name)
+        for i in range(0,numsongs):
+            trackslist.append((tracks[i]['title'] + ' ' + tracks[i]['albumtitle']))
+        if not trackslist==[]:
+            vlcplayer.media_manager(trackslist,'Gaana')
+            vlcplayer.gaana_player(currenttrackid)
+    else:
+        say("Unable to find matching playlist")
+
+#------------------------End of Gaana Functions-------------------------------
+
+#------------------------Start of Deezer Functions-------------------------------
+def deezer_playlist_select(phrase):
+    trackslist=[]
+    deezer_user_playlists=[]
+    currenttrackid=0
+    idx=phrase.find('play')
+    track=phrase[idx:]
+    track=track.replace("'}", "",1)
+    track = track.replace('play','',1)
+    track = track.replace('from deezer','',1)
+    track=track.strip()
+    playlistnumreq=re.findall(r'\b\d+\b', track)
+    if playlistnumreq !=[]:
+        playlistnumreq=playlistnumreq[0]
+    deezer_response = requests.get("https://api.deezer.com/user/" + configuration['Deezer']['User_id'] + "/playlists",verify=False)
+    deezer_user_playlist_info=json.loads(deezer_response.text)
+    if deezer_user_playlist_info['data'] != []:
+        for i in range(0,len(deezer_user_playlist_info['data'])):
+            deezer_user_playlists.append(deezer_user_playlist_info['data'][i]['tracklist'])
+    else:
+        say("No playlists found for the user")
+    numuserplaylists=len(deezer_user_playlists)
+    if playlistnumreq !=[] and "top" not in track and int(playlistnumreq) <= int(numuserplaylists):
+        print("Getting links for playlist number " + playlistnumreq)
+        say("Getting links for playlist number " + playlistnumreq)
+        tracklisturl=deezer_user_playlists[(int(playlistnumreq)-1)]
+    else:
+        say("No matching playlists found")
+    deezer_tracks_response = requests.get(tracklisturl,verify=False)
+    deezer_user_playlist_tracks_info=json.loads(deezer_tracks_response.text)
+    numsongs=len(deezer_user_playlist_tracks_info['data'])
+    if not numsongs==[]:
+        say("Getting the tracks from " + deezer_user_playlist_info['data'][int(playlistnumreq)-1]['title'])
+        for i in range(0,numsongs):
+            trackslist.append((deezer_user_playlist_tracks_info['data'][i]['title'] + ' by ' + deezer_user_playlist_tracks_info['data'][i]['artist']['name'] + ' from ' + deezer_user_playlist_tracks_info['data'][i]['album']['title']))
+        if not trackslist==[]:
+            vlcplayer.media_manager(trackslist,'Deezer')
+            vlcplayer.gaana_player(currenttrackid)
+    else:
+        say("Unable to find matching tracks")
+
+#------------------------End of Deezer Functions-------------------------------
 
 #GPIO Device Control
 def Action(phrase):
-    if 'shut down' in phrase:
+    if 'a candy' in phrase:
+        say('Here is your candy')
+        SetAngle(135)
+        time.sleep(1)
+        SetAngle(0)
+    if 'shutdown' in phrase:
         say('Shutting down Raspberry Pi')
         time.sleep(10)
         os.system("sudo shutdown -h now")
         #subprocess.call(["shutdown -h now"], shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if 'motor' in phrase:
+    if 'servo' in phrase:
         for s in re.findall(r'\b\d+\b', phrase):
             SetAngle(int(s))
-    if 'a candy' in phrase:
-            say("Here is your candy!!")
-            SetAngle(135)
-            time.sleep(1)
-            SetAngle(0)
     if 'zero' in phrase:
         SetAngle(0)
     else:
